@@ -6,45 +6,29 @@ const AUCTIONS = {
 };
 const lower = (x) => x?.toLowerCase();
 
-async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: { accept: 'application/json', 'user-agent': 'warplet-bid-audit' },
-    signal: AbortSignal.timeout(30_000),
-  });
-  const text = await response.text();
-  let body;
-  try { body = JSON.parse(text); } catch { body = { raw: text }; }
-  return { status: response.status, body };
-}
-
 const url = new URL('https://base.blockscout.com/api');
 url.searchParams.set('module', 'account');
 url.searchParams.set('action', 'tokentx');
 url.searchParams.set('address', TARGET);
 url.searchParams.set('contractaddress', TOKEN);
+url.searchParams.set('startblock', '44000000');
 url.searchParams.set('page', '1');
-url.searchParams.set('offset', '10000');
+url.searchParams.set('offset', '1000');
 url.searchParams.set('sort', 'asc');
-const targetResponse = await fetchJson(url);
-const targetRows = Array.isArray(targetResponse.body?.result) ? targetResponse.body.result : [];
+const response = await fetch(url, {
+  headers: { accept: 'application/json', 'user-agent': 'warplet-bid-audit' },
+  signal: AbortSignal.timeout(30_000),
+});
+const text = await response.text();
+let body;
+try { body = JSON.parse(text); } catch { body = { raw: text }; }
+const rows = Array.isArray(body?.result) ? body.result : [];
 const auctionSet = new Set(Object.values(AUCTIONS).map(lower));
-const targetRelevant = targetRows.filter((row) => auctionSet.has(lower(row.from)) || auctionSet.has(lower(row.to)));
-const hashes = [...new Set(targetRelevant.map((row) => lower(row.hash)))];
-
-const transactionDetails = {};
-for (const hash of hashes) {
-  transactionDetails[hash] = {
-    transaction: await fetchJson(`https://base.blockscout.com/api/v2/transactions/${hash}`),
-    logs: await fetchJson(`https://base.blockscout.com/api/v2/transactions/${hash}/logs`),
-  };
-}
-
+const relevant = rows.filter((row) => auctionSet.has(lower(row.from)) || auctionSet.has(lower(row.to)));
 console.log(JSON.stringify({
-  fetchedAt: new Date().toISOString(),
-  target: TARGET,
-  token: TOKEN,
-  auctionAddresses: AUCTIONS,
-  counts: { targetAll: targetRows.length, targetRelevant: targetRelevant.length, relatedHashes: hashes.length },
-  targetRelevant,
-  transactionDetails,
+  fetchedAt: new Date().toISOString(), status: response.status,
+  target: TARGET, token: TOKEN, auctionAddresses: AUCTIONS,
+  totalTokenTransfersSinceBlock44000000: rows.length,
+  relevantCount: relevant.length,
+  relevant,
 }, null, 2));

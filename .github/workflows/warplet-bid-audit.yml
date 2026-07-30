@@ -18,14 +18,12 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Discover exact bid sequence
-        env:
-          RPC_URL: https://rpc-endpoints.superfluid.dev/base-mainnet
-        run: node .github/scripts/warplet-bid-discovery-rpc.mjs > warplet-bid-audit.json
-      - name: Print bid sequence
+      - name: Fetch WARPGOBB historical ledger
+        run: node .github/scripts/warplet-balance-ledger.mjs > warplet-bid-audit.json
+      - name: Print ledger
         run: cat warplet-bid-audit.json
       - uses: actions/upload-artifact@v4
         with:

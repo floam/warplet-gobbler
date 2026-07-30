@@ -17,6 +17,7 @@ const { base } = webRequire('viem/chains');
 
 const TARGET = getAddress('0x1034071986fbf826f37d4a6442b056d3442f7777');
 const TOKEN = getAddress('0x1A339C38Ae22726F1A4235bCecf8f12aebE4C5E8');
+const ZERO = '0x0000000000000000000000000000000000000000';
 const AUCTIONS = [
   { name: 'current', address: getAddress('0x2943Fd3DD84BB3Bf51d5C4b288f648ab45e4Fc3D'), fromBlock: 47430889n },
   { name: 'legacy', address: getAddress('0xa1046076E518B3Fe1604B2F19ABE90c55c252fd9'), fromBlock: 44000000n },
@@ -47,16 +48,10 @@ const auctionAbi = parseAbi([
 ]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const json = (value) => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
+const fmt = (value, decimals) => formatUnits(BigInt(value), decimals);
+const hexBlock = (value) => `0x${BigInt(value).toString(16)}`;
 
-function json(value) {
-  return JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
-}
-function fmt(value, decimals) {
-  return formatUnits(BigInt(value), decimals);
-}
-function hexBlock(value) {
-  return `0x${BigInt(value).toString(16)}`;
-}
 function isThrottle(error) {
   const s = String(error?.shortMessage || error?.message || error).toLowerCase();
   return s.includes('compute units per second') || s.includes('rate limit') || s.includes('too many requests') || s.includes('429');
@@ -64,12 +59,12 @@ function isThrottle(error) {
 
 async function paced(label, fn) {
   for (let attempt = 1; attempt <= 10; attempt++) {
-    await sleep(450);
+    await sleep(400);
     try {
       return await fn();
     } catch (error) {
       if (!isThrottle(error) || attempt === 10) throw error;
-      await sleep(attempt * 1200);
+      await sleep(attempt * 1000);
     }
   }
   throw new Error(`${label} exhausted retries`);
@@ -83,45 +78,43 @@ async function alchemyRpc(method, params) {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
     });
     const body = await response.json();
-    if (!response.ok || body.error) {
-      const error = new Error(body.error?.message || `${method} returned HTTP ${response.status}`);
-      error.code = body.error?.code || response.status;
-      throw error;
-    }
+    if (!response.ok || body.error) throw new Error(body.error?.message || `${method} returned HTTP ${response.status}`);
     return body.result;
   });
 }
 
-async function getAssetTransfers({ auction, direction, latestBlock }) {
+async function assetTransfers(query) {
   const transfers = [];
   let pageKey;
   do {
-    const query = {
-      fromBlock: hexBlock(auction.fromBlock),
-      toBlock: hexBlock(latestBlock),
-      category: ['erc20'],
-      contractAddresses: [TOKEN],
-      excludeZeroValue: false,
-      withMetadata: true,
-      maxCount: '0x3e8',
-      order: 'asc',
-    };
-    if (direction === 'in') query.toAddress = auction.address;
-    else query.fromAddress = auction.address;
-    if (pageKey) query.pageKey = pageKey;
-    const result = await alchemyRpc('alchemy_getAssetTransfers', [query]);
+    const result = await alchemyRpc('alchemy_getAssetTransfers', [{ ...query, ...(pageKey ? { pageKey } : {}) }]);
     transfers.push(...(result.transfers || []));
     pageKey = result.pageKey;
   } while (pageKey);
   return transfers;
 }
 
+async function accountAuctionTransfers(account, auction, latestBlock) {
+  const common = {
+    fromBlock: hexBlock(auction.fromBlock),
+    toBlock: hexBlock(latestBlock),
+    excludeZeroValue: false,
+    withMetadata: true,
+    maxCount: '0x3e8',
+    order: 'asc',
+  };
+  const [erc20In, erc20Out, nativeIn] = await Promise.all([
+    assetTransfers({ ...common, category: ['erc20'], contractAddresses: [TOKEN], fromAddress: account, toAddress: auction.address }),
+    assetTransfers({ ...common, category: ['erc20'], contractAddresses: [TOKEN], fromAddress: auction.address, toAddress: account }),
+    assetTransfers({ ...common, category: ['external'], fromAddress: account, toAddress: auction.address }),
+  ]);
+  return { erc20In, erc20Out, nativeIn };
+}
+
 const blockCache = new Map();
 async function blockInfo(blockNumber) {
   const key = BigInt(blockNumber).toString();
-  if (!blockCache.has(key)) {
-    blockCache.set(key, paced('getBlock', () => client.getBlock({ blockNumber: BigInt(blockNumber) })));
-  }
+  if (!blockCache.has(key)) blockCache.set(key, paced('getBlock', () => client.getBlock({ blockNumber: BigInt(blockNumber) })));
   const block = await blockCache.get(key);
   return { number: block.number, timestamp: block.timestamp, iso: new Date(Number(block.timestamp) * 1000).toISOString() };
 }
@@ -148,12 +141,7 @@ function decodeAuctionEvents(receipt, auctionAddress) {
   const out = [];
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== auctionAddress.toLowerCase()) continue;
-    for (const [kind, event] of [
-      ['bid', bidEvent],
-      ['started', startEvent],
-      ['extended', extendEvent],
-      ['settled', settleEvent],
-    ]) {
+    for (const [kind, event] of [['bid', bidEvent], ['started', startEvent], ['extended', extendEvent], ['settled', settleEvent]]) {
       try {
         const decoded = decodeEventLog({ abi: [event], data: log.data, topics: log.topics });
         out.push({ kind, logIndex: log.logIndex, args: decoded.args });
@@ -162,6 +150,23 @@ function decodeAuctionEvents(receipt, auctionAddress) {
     }
   }
   return out;
+}
+
+async function loadTransaction(hash, auction, decimals) {
+  const tx = await paced('getTransaction', () => client.getTransaction({ hash }));
+  const receipt = await paced('getTransactionReceipt', () => client.getTransactionReceipt({ hash }));
+  return {
+    hash,
+    block: await blockInfo(receipt.blockNumber),
+    transactionFrom: getAddress(tx.from),
+    transactionTo: tx.to ? getAddress(tx.to) : null,
+    nativeValue: tx.value.toString(),
+    nativeValueEth: formatUnits(tx.value, 18),
+    receiptStatus: receipt.status,
+    gasUsed: receipt.gasUsed.toString(),
+    tokenTransfers: decodeTokenTransfers(receipt, decimals),
+    auctionEvents: decodeAuctionEvents(receipt, auction.address),
+  };
 }
 
 async function snapshotAccounts(accounts, blockNumber, decimals) {
@@ -228,25 +233,119 @@ async function auctionStateAt(auctionAddress, blockNumber, decimals) {
 }
 
 async function fetchLedgerEntries(account, auctionAddress) {
-  const baseUrl = `https://balances.superfluid.dev/v1/accounts/${account}/tokens/${TOKEN}/entries`;
-  const pages = [];
-  for (let offset = 0; offset < 1000; offset += 100) {
-    const url = new URL(baseUrl);
-    url.searchParams.set('chain', '8453');
-    url.searchParams.set('counterparty', auctionAddress);
-    url.searchParams.set('direction', 'asc');
-    url.searchParams.set('limit', '100');
-    url.searchParams.set('offset', String(offset));
-    const response = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'warplet-bid-audit/1.0' } });
-    const text = await response.text();
-    let body;
-    try { body = JSON.parse(text); } catch { body = { raw: text }; }
-    pages.push({ offset, status: response.status, body });
-    if (!response.ok) break;
-    const rows = Array.isArray(body) ? body : body.entries ?? body.items ?? body.data ?? [];
-    if (!Array.isArray(rows) || rows.length < 100) break;
+  const url = new URL(`https://balances.superfluid.dev/v1/accounts/${account}/tokens/${TOKEN}/entries`);
+  url.searchParams.set('chain', '8453');
+  url.searchParams.set('counterparty', auctionAddress);
+  url.searchParams.set('direction', 'asc');
+  url.searchParams.set('limit', '100');
+  url.searchParams.set('offset', '0');
+  const response = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'warplet-bid-audit/1.0' } });
+  const text = await response.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { raw: text }; }
+  return { status: response.status, body };
+}
+
+async function discoverAuction(auction, latestBlock, decimals) {
+  const pending = [TARGET];
+  const seenAccounts = new Set();
+  const accountTransfers = {};
+  const transactions = new Map();
+  const targetTokenIds = new Set();
+
+  while (pending.length && seenAccounts.size < 12) {
+    const account = getAddress(pending.shift());
+    const key = account.toLowerCase();
+    if (seenAccounts.has(key)) continue;
+    seenAccounts.add(key);
+    const transfers = await accountAuctionTransfers(account, auction, latestBlock);
+    accountTransfers[account] = {
+      erc20ToAuction: transfers.erc20In.length,
+      erc20RefundsFromAuction: transfers.erc20Out.length,
+      nativeCallsToAuction: transfers.nativeIn.length,
+    };
+    const hashes = [...new Set([...transfers.erc20In, ...transfers.erc20Out, ...transfers.nativeIn].map((x) => x.hash).filter(Boolean))];
+    for (const hash of hashes) {
+      if (!transactions.has(hash)) transactions.set(hash, await loadTransaction(hash, auction, decimals));
+      const tx = transactions.get(hash);
+      for (const event of tx.auctionEvents) {
+        if (event.kind === 'bid' && getAddress(event.args.bidder).toLowerCase() === TARGET.toLowerCase()) {
+          targetTokenIds.add(event.args.tokenId.toString());
+        }
+      }
+    }
+
+    for (const tx of transactions.values()) {
+      const relevantEvents = tx.auctionEvents.filter((e) => e.kind === 'bid' && targetTokenIds.has(e.args.tokenId.toString()));
+      if (!relevantEvents.length) continue;
+      for (const event of relevantEvents) pending.push(getAddress(event.args.bidder));
+      for (const transfer of tx.tokenTransfers) {
+        if (transfer.from.toLowerCase() === auction.address.toLowerCase() && transfer.to.toLowerCase() !== ZERO) pending.push(transfer.to);
+        if (transfer.to.toLowerCase() === auction.address.toLowerCase() && transfer.from.toLowerCase() !== ZERO) pending.push(transfer.from);
+      }
+    }
   }
-  return pages;
+
+  const txs = [...transactions.values()].sort((a, b) => Number(BigInt(a.block.number) - BigInt(b.block.number)));
+  const bids = [];
+  const lifecycle = [];
+  for (const tx of txs) {
+    for (const event of tx.auctionEvents) {
+      const tokenId = event.args.tokenId?.toString();
+      if (!tokenId || !targetTokenIds.has(tokenId)) continue;
+      if (event.kind === 'bid') {
+        bids.push({
+          auctionName: auction.name,
+          auctionAddress: auction.address,
+          tokenId,
+          bidder: getAddress(event.args.bidder),
+          amount: event.args.amount.toString(),
+          amountFormatted: fmt(event.args.amount, decimals),
+          transactionHash: tx.hash,
+          transactionFrom: tx.transactionFrom,
+          transactionTo: tx.transactionTo,
+          nativeValue: tx.nativeValue,
+          nativeValueEth: tx.nativeValueEth,
+          receiptStatus: tx.receiptStatus,
+          gasUsed: tx.gasUsed,
+          block: tx.block,
+          logIndex: event.logIndex,
+          tokenTransfers: tx.tokenTransfers,
+        });
+      } else {
+        lifecycle.push({ kind: event.kind, transactionHash: tx.hash, block: tx.block, logIndex: event.logIndex, args: event.args });
+      }
+    }
+  }
+  bids.sort((a, b) => Number(BigInt(a.block.number) - BigInt(b.block.number)) || Number(a.logIndex - b.logIndex));
+
+  const sequences = [];
+  for (const tokenId of targetTokenIds) {
+    const sequenceBids = bids.filter((b) => b.tokenId === tokenId);
+    const bidders = [...new Set(sequenceBids.map((b) => b.bidder.toLowerCase()))].map(getAddress);
+    const accounts = [...bidders, auction.address];
+    for (const bid of sequenceBids) {
+      const blockNumber = BigInt(bid.block.number);
+      bid.auctionStateAfterBlock = await auctionStateAt(auction.address, blockNumber, decimals);
+      bid.snapshots = {
+        beforeBlock: await snapshotAccounts(accounts, blockNumber - 1n, decimals),
+        afterBlock: await snapshotAccounts(accounts, blockNumber, decimals),
+      };
+    }
+    const ledger = {};
+    for (const bidder of bidders) ledger[bidder] = await fetchLedgerEntries(bidder, auction.address);
+    sequences.push({
+      auctionName: auction.name,
+      auctionAddress: auction.address,
+      tokenId,
+      bidders,
+      bids: sequenceBids,
+      lifecycle: lifecycle.filter((x) => x.args.tokenId?.toString() === tokenId),
+      balancesApi: ledger,
+    });
+  }
+
+  return { auction, seenAccounts: [...seenAccounts], accountTransfers, decodedTransactions: txs.length, sequences };
 }
 
 async function main() {
@@ -254,89 +353,9 @@ async function main() {
   const symbol = await paced('token symbol', () => client.readContract({ address: TOKEN, abi: tokenAbi, functionName: 'symbol' }));
   const decimals = await paced('token decimals', () => client.readContract({ address: TOKEN, abi: tokenAbi, functionName: 'decimals' }));
 
-  const allAuctionData = [];
-  for (const auction of AUCTIONS) {
-    const incoming = await getAssetTransfers({ auction, direction: 'in', latestBlock: latest.number });
-    const outgoing = await getAssetTransfers({ auction, direction: 'out', latestBlock: latest.number });
-    const txHashes = [...new Set([...incoming, ...outgoing].map((x) => x.hash).filter(Boolean))];
-    const transactions = [];
-    for (const hash of txHashes) {
-      const tx = await paced('getTransaction', () => client.getTransaction({ hash }));
-      const receipt = await paced('getTransactionReceipt', () => client.getTransactionReceipt({ hash }));
-      transactions.push({
-        hash,
-        block: await blockInfo(receipt.blockNumber),
-        transactionFrom: getAddress(tx.from),
-        transactionTo: tx.to ? getAddress(tx.to) : null,
-        nativeValue: tx.value.toString(),
-        nativeValueEth: formatUnits(tx.value, 18),
-        receiptStatus: receipt.status,
-        gasUsed: receipt.gasUsed.toString(),
-        tokenTransfers: decodeTokenTransfers(receipt, decimals),
-        auctionEvents: decodeAuctionEvents(receipt, auction.address),
-      });
-    }
-    transactions.sort((a, b) => Number(BigInt(a.block.number) - BigInt(b.block.number)));
-    allAuctionData.push({ auction, incoming, outgoing, transactions });
-  }
-
-  const sequences = [];
-  for (const auctionData of allAuctionData) {
-    const bids = [];
-    const lifecycle = [];
-    for (const tx of auctionData.transactions) {
-      for (const event of tx.auctionEvents) {
-        if (event.kind === 'bid') {
-          bids.push({
-            auctionName: auctionData.auction.name,
-            auctionAddress: auctionData.auction.address,
-            tokenId: event.args.tokenId.toString(),
-            bidder: getAddress(event.args.bidder),
-            amount: event.args.amount.toString(),
-            amountFormatted: fmt(event.args.amount, decimals),
-            transactionHash: tx.hash,
-            transactionFrom: tx.transactionFrom,
-            transactionTo: tx.transactionTo,
-            nativeValue: tx.nativeValue,
-            nativeValueEth: tx.nativeValueEth,
-            receiptStatus: tx.receiptStatus,
-            gasUsed: tx.gasUsed,
-            block: tx.block,
-            logIndex: event.logIndex,
-            tokenTransfers: tx.tokenTransfers,
-          });
-        } else {
-          lifecycle.push({ kind: event.kind, transactionHash: tx.hash, block: tx.block, logIndex: event.logIndex, args: event.args });
-        }
-      }
-    }
-    bids.sort((a, b) => Number(BigInt(a.block.number) - BigInt(b.block.number)) || Number(a.logIndex - b.logIndex));
-    const targetTokenIds = new Set(bids.filter((b) => b.bidder.toLowerCase() === TARGET.toLowerCase()).map((b) => b.tokenId));
-    for (const tokenId of targetTokenIds) {
-      const sequenceBids = bids.filter((b) => b.tokenId === tokenId);
-      const bidders = [...new Set(sequenceBids.map((b) => b.bidder.toLowerCase()))].map(getAddress);
-      const accounts = [...bidders, auctionData.auction.address];
-      for (const bid of sequenceBids) {
-        const blockNumber = BigInt(bid.block.number);
-        bid.auctionStateAfterBlock = await auctionStateAt(auctionData.auction.address, blockNumber, decimals);
-        bid.snapshots = {
-          beforeBlock: await snapshotAccounts(accounts, blockNumber - 1n, decimals),
-          afterBlock: await snapshotAccounts(accounts, blockNumber, decimals),
-        };
-      }
-      const ledger = {};
-      for (const bidder of bidders) ledger[bidder] = await fetchLedgerEntries(bidder, auctionData.auction.address);
-      sequences.push({
-        auctionName: auctionData.auction.name,
-        auctionAddress: auctionData.auction.address,
-        tokenId,
-        bidders,
-        bids: sequenceBids,
-        lifecycle: lifecycle.filter((x) => x.args.tokenId?.toString() === tokenId),
-        balancesApi: ledger,
-      });
-    }
-  }
+  const discoveries = [];
+  for (const auction of AUCTIONS) discoveries.push(await discoverAuction(auction, latest.number, decimals));
+  const sequences = discoveries.flatMap((x) => x.sequences);
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -344,12 +363,12 @@ async function main() {
     target: TARGET,
     token: { address: TOKEN, symbol, decimals },
     contracts: AUCTIONS,
-    discovery: allAuctionData.map((x) => ({
+    discovery: discoveries.map((x) => ({
       auctionName: x.auction.name,
       auctionAddress: x.auction.address,
-      incomingAssetTransferCount: x.incoming.length,
-      outgoingAssetTransferCount: x.outgoing.length,
-      decodedTransactionCount: x.transactions.length,
+      seenAccounts: x.seenAccounts,
+      accountTransfers: x.accountTransfers,
+      decodedTransactionCount: x.decodedTransactions,
     })),
     targetBidCount: sequences.reduce((n, s) => n + s.bids.filter((b) => b.bidder.toLowerCase() === TARGET.toLowerCase()).length, 0),
     sequenceCount: sequences.length,

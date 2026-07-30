@@ -17,34 +17,22 @@ async function fetchJson(url) {
   return { status: response.status, body };
 }
 
-async function tokenTransfers(address) {
-  const url = new URL('https://base.blockscout.com/api');
-  url.searchParams.set('module', 'account');
-  url.searchParams.set('action', 'tokentx');
-  url.searchParams.set('address', address);
-  url.searchParams.set('contractaddress', TOKEN);
-  url.searchParams.set('page', '1');
-  url.searchParams.set('offset', '10000');
-  url.searchParams.set('sort', 'asc');
-  const response = await fetchJson(url);
-  const rows = Array.isArray(response.body?.result) ? response.body.result : [];
-  return { ...response, rows };
-}
-
-const target = await tokenTransfers(TARGET);
-const auctions = {};
-for (const [name, address] of Object.entries(AUCTIONS)) auctions[name] = await tokenTransfers(address);
-
+const url = new URL('https://base.blockscout.com/api');
+url.searchParams.set('module', 'account');
+url.searchParams.set('action', 'tokentx');
+url.searchParams.set('address', TARGET);
+url.searchParams.set('contractaddress', TOKEN);
+url.searchParams.set('page', '1');
+url.searchParams.set('offset', '10000');
+url.searchParams.set('sort', 'asc');
+const targetResponse = await fetchJson(url);
+const targetRows = Array.isArray(targetResponse.body?.result) ? targetResponse.body.result : [];
 const auctionSet = new Set(Object.values(AUCTIONS).map(lower));
-const targetRelevant = target.rows.filter((row) => auctionSet.has(lower(row.from)) || auctionSet.has(lower(row.to)));
-const relatedHashes = new Set(targetRelevant.map((row) => lower(row.hash)));
-const related = {};
-for (const [name, result] of Object.entries(auctions)) {
-  related[name] = result.rows.filter((row) => relatedHashes.has(lower(row.hash)));
-}
+const targetRelevant = targetRows.filter((row) => auctionSet.has(lower(row.from)) || auctionSet.has(lower(row.to)));
+const hashes = [...new Set(targetRelevant.map((row) => lower(row.hash)))];
 
 const transactionDetails = {};
-for (const hash of relatedHashes) {
+for (const hash of hashes) {
   transactionDetails[hash] = {
     transaction: await fetchJson(`https://base.blockscout.com/api/v2/transactions/${hash}`),
     logs: await fetchJson(`https://base.blockscout.com/api/v2/transactions/${hash}/logs`),
@@ -56,14 +44,7 @@ console.log(JSON.stringify({
   target: TARGET,
   token: TOKEN,
   auctionAddresses: AUCTIONS,
-  counts: {
-    targetAll: target.rows.length,
-    targetRelevant: targetRelevant.length,
-    currentAuctionAll: auctions.current.rows.length,
-    legacyAuctionAll: auctions.legacy.rows.length,
-    relatedHashes: relatedHashes.size,
-  },
+  counts: { targetAll: targetRows.length, targetRelevant: targetRelevant.length, relatedHashes: hashes.length },
   targetRelevant,
-  related,
   transactionDetails,
 }, null, 2));

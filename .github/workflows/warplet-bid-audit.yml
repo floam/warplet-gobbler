@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Index WARPGOBB auction transfers
-        run: node .github/scripts/warplet-blockscout-discovery.mjs > warplet-bid-audit.json
-      - name: Print discovery
+      - name: Expand latest Warplet bid duel
+        run: node .github/scripts/warplet-expand-latest-duel.mjs > warplet-bid-audit.json
+      - name: Print duel
         run: cat warplet-bid-audit.json
       - uses: actions/upload-artifact@v4
         with:

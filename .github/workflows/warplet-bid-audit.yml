@@ -21,9 +21,11 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Trace auction tail
-        run: node .github/scripts/warplet-duel-tail.mjs > warplet-bid-audit.json
-      - name: Print tail
+      - name: Read current auction state
+        env:
+          RPC_URL: https://base-mainnet.g.alchemy.com/v2/xn7PYKk2hrDMxsCtaYPcn
+        run: node .github/scripts/warplet-current-auction.mjs > warplet-bid-audit.json
+      - name: Print state
         run: cat warplet-bid-audit.json
       - uses: actions/upload-artifact@v4
         with:

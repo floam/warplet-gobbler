@@ -21,9 +21,9 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch WARPGOBB historical ledger
-        run: node .github/scripts/warplet-balance-ledger.mjs > warplet-bid-audit.json
-      - name: Print ledger
+      - name: Index WARPGOBB auction transfers
+        run: node .github/scripts/warplet-blockscout-discovery.mjs > warplet-bid-audit.json
+      - name: Print discovery
         run: cat warplet-bid-audit.json
       - uses: actions/upload-artifact@v4
         with:

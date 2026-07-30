@@ -18,41 +18,15 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Query Base and Superfluid balance ledger
+      - name: Discover exact bid sequence
         env:
           RPC_URL: https://base-mainnet.g.alchemy.com/v2/xn7PYKk2hrDMxsCtaYPcn
-        run: node .github/scripts/warplet-bid-audit-pure.mjs > warplet-bid-audit.json
-      - name: Print compact audit summary
-        run: |
-          node - <<'NODE'
-          const r = require('./warplet-bid-audit.json');
-          console.log(JSON.stringify({
-            generatedAt: r.generatedAt,
-            target: r.target,
-            token: r.token,
-            targetBidCount: r.targetBidCount,
-            sequenceCount: r.sequenceCount,
-            discovery: r.discovery,
-            sequences: r.sequences.map(s => ({
-              auctionName: s.auctionName,
-              auctionAddress: s.auctionAddress,
-              tokenId: s.tokenId,
-              bidders: s.bidders,
-              bids: s.bids.map(b => ({
-                iso: b.block.iso,
-                transactionHash: b.transactionHash,
-                bidder: b.bidder,
-                amountFormatted: b.amountFormatted,
-                nativeValueEth: b.nativeValueEth,
-                tokenTransfers: b.tokenTransfers,
-              })),
-              lifecycle: s.lifecycle,
-            })),
-          }, null, 2));
-          NODE
+        run: node .github/scripts/warplet-bid-discovery.mjs > warplet-bid-audit.json
+      - name: Print bid sequence
+        run: cat warplet-bid-audit.json
       - uses: actions/upload-artifact@v4
         with:
           name: warplet-bid-audit

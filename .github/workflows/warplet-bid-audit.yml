@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
       - name: Query Base and Superfluid balance ledger
         env:
           RPC_URL: https://base-mainnet.g.alchemy.com/v2/xn7PYKk2hrDMxsCtaYPcn

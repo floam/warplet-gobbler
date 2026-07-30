@@ -18,13 +18,19 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Expand latest Warplet bid duel
-        run: node .github/scripts/warplet-expand-latest-duel.mjs > warplet-bid-audit.json
-      - name: Print duel
-        run: cat warplet-bid-audit.json
+      - name: Snapshot bidder SuperToken balances
+        env:
+          RPC_URL: https://base-mainnet.g.alchemy.com/v2/xn7PYKk2hrDMxsCtaYPcn
+        run: node .github/scripts/warplet-alchemy-snapshots.mjs > warplet-bid-audit.json
+      - name: Print snapshot metadata
+        run: |
+          node - <<'NODE'
+          const r=require('./warplet-bid-audit.json');
+          console.log(JSON.stringify({fetchedAt:r.fetchedAt,chainId:r.chainId,token:r.token,accounts:r.accounts,bidBlocks:r.bidBlocks,blocks:r.blocks},null,2));
+          NODE
       - uses: actions/upload-artifact@v4
         with:
           name: warplet-bid-audit
